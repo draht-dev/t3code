@@ -36,6 +36,8 @@ import { claudeMcpToolPresentationInput } from "./claude_mcp_tool_presentation/i
 import { assertClaudeMcpToolPresentationOutput } from "./claude_mcp_tool_presentation/output.ts";
 import { claudeResultIsErrorInput } from "./claude_result_is_error/input.ts";
 import { assertClaudeResultIsErrorOutput } from "./claude_result_is_error/output.ts";
+import { DRAHT_PERMISSION_DECLINED_FILE, drahtPermissionInput } from "./draht_permission/input.ts";
+import { assertDrahtPermissionOutput } from "./draht_permission/output.ts";
 import { grokAutoBlockedCommandInput } from "./grok_auto_blocked_command/input.ts";
 import { assertGrokAutoBlockedCommandOutput } from "./grok_auto_blocked_command/output.ts";
 import { grokBackgroundBashInput } from "./grok_background_bash/input.ts";
@@ -205,6 +207,7 @@ import {
   CLAUDE_MODEL_SELECTION,
   CODEX_MODEL_SELECTION,
   CURSOR_MODEL_SELECTION,
+  DRAHT_MODEL_SELECTION,
   GROK_MODEL_SELECTION,
   MUSE_MODEL_SELECTION,
   OPENCODE_MODEL_SELECTION,
@@ -657,6 +660,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         driver: ProviderDriverKind.make("pi"),
         transcriptFile: new URL("./simple/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
+        assertOutput: assertPiSimpleOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL("./simple/draht_transcript.ndjson", import.meta.url),
+        modelSelection: DRAHT_MODEL_SELECTION,
         assertOutput: assertPiSimpleOutput,
       },
       {
@@ -1235,10 +1244,29 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         assertOutput: assertPiMultiTurnOutput,
       },
       {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL("./multi_turn/draht_transcript.ndjson", import.meta.url),
+        modelSelection: DRAHT_MODEL_SELECTION,
+        assertOutput: assertPiMultiTurnOutput,
+      },
+      {
         driver: ProviderDriverKind.make("muse"),
         transcriptFile: new URL("./multi_turn/muse_transcript.ndjson", import.meta.url),
         modelSelection: MUSE_MODEL_SELECTION,
         assertOutput: assertMuseMultiTurnOutput,
+      },
+    ],
+  },
+  {
+    name: "draht_permission",
+    buildInput: drahtPermissionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL("./draht_permission/draht_transcript.ndjson", import.meta.url),
+        modelSelection: DRAHT_MODEL_SELECTION,
+        expectedAbsentWorkspacePaths: [DRAHT_PERMISSION_DECLINED_FILE],
+        assertOutput: assertDrahtPermissionOutput,
       },
     ],
   },

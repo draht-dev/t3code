@@ -153,8 +153,11 @@ export function upsertProviderWorkspaceSnapshot(
 }
 
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
-  if (provider.driver === ProviderDriverKind.make("pi")) {
-    // Pi reports known auth only after RPC inventory discovery completes.
+  if (
+    provider.driver === ProviderDriverKind.make("pi") ||
+    provider.driver === ProviderDriverKind.make("draht")
+  ) {
+    // Pi and Draht report known auth only after RPC inventory discovery completes.
     // An empty inventory is warning/unauthenticated; failed or interactive
     // discovery stays ready/unknown and must keep the last known models.
     return !(
