@@ -213,7 +213,7 @@ const record = Effect.gen(function* () {
   const workspace = yield* Effect.promise(() =>
     makeCheckpointWorkspace(`draht-rpc-record-${fixture.name}`, fixtureInput.workspaceFiles),
   );
-  yield* fs.makeDirectory(path.join(workspace, ".draht"));
+  yield* fs.makeDirectory(path.join(workspace, ".draht"), { recursive: true });
   yield* fs.writeFileString(
     path.join(workspace, ".draht", "settings.json"),
     encodeJson(WORKSPACE_DRAHT_SETTINGS),

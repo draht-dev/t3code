@@ -7,6 +7,7 @@ import {
   ProviderDriverKind,
   type ChatAttachment,
   type ModelSelection,
+  type NodeId,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
@@ -16,6 +17,8 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2TurnItem,
   type OrchestrationV2UserInputQuestion,
   type ProviderApprovalDecision,
@@ -70,6 +73,35 @@ import {
   resolveDrahtLaunchArgs,
 } from "./mcpInjection.ts";
 import { DRAHT_FILE_CHANGE_TOOLS } from "./mcpExtensionSource.ts";
+import {
+  DRAHT_DUET_DELEGATE_TOOL,
+  DRAHT_DUET_STATUS_KEY,
+  DRAHT_SUBAGENT_TOOL,
+  DRAHT_WORKFLOW_MESSAGE,
+  DRAHT_WORKFLOW_TOOL,
+  drahtAgentProgress,
+  drahtAgentResult,
+  drahtAgentStatus,
+  drahtChildApprovalLabel,
+  drahtRunProgress,
+  drahtRunPrompt,
+  drahtRunResult,
+  drahtRunStatus,
+  drahtWorkflowProgress,
+  formatDrahtDuetParticipant,
+  isTerminalDrahtSubagentStatus,
+  type DrahtTerminalSubagentStatus,
+  latestDrahtDuetState,
+  parseDrahtDuetActivity,
+  parseDrahtDuetAssignments,
+  parseDrahtDuetExitCodes,
+  parseDrahtDuetSections,
+  parseDrahtDuetStateEntry,
+  parseDrahtDuetStatus,
+  parseDrahtPolyphaseDetails,
+  parseDrahtStartedWorkflow,
+  type DrahtDuetParticipant,
+} from "./polyphase.ts";
 
 export const DRAHT_PROVIDER = ProviderDriverKind.make("draht");
 const DRAHT_DRIVER_KIND = DRAHT_PROVIDER;
@@ -389,6 +421,8 @@ interface PendingDrahtPrompt {
   readonly method: "select" | "confirm" | "input" | "editor";
   readonly questionId: string;
   readonly approvalKey: string;
+  /** Draht's own option for each decision, which must be answered by id. */
+  readonly optionIds: Partial<Record<"accept" | "decline", string>>;
   readonly expiresAt: number | null;
   expirationFiber: Fiber.Fiber<void> | null;
   runtimeRequest: OrchestrationV2RuntimeRequest;
@@ -409,6 +443,49 @@ function drahtApprovalRequestKind(event: DrahtRpcRecord, title: string): "comman
     : "command";
 }
 
+interface DrahtApprovalChoice {
+  readonly id: string;
+  readonly label: string;
+  readonly decision: "accept" | "decline";
+}
+
+/** Draht's gate offers its choices in `detail.options`, each stating its own decision. */
+function drahtApprovalChoices(detail: unknown): ReadonlyArray<DrahtApprovalChoice> {
+  const options = recordField(detail, "options");
+  if (!Array.isArray(options)) return [];
+  const choices: Array<DrahtApprovalChoice> = [];
+  for (const option of options) {
+    const id = recordString(option, "id");
+    const label = recordString(option, "label")?.trim();
+    const nativeDecision = recordString(option, "decision");
+    const decision =
+      nativeDecision === "approve" ? "accept" : nativeDecision === "deny" ? "decline" : undefined;
+    if (id === undefined || !label || decision === undefined) continue;
+    if (choices.some((choice) => choice.decision === decision)) continue;
+    choices.push({ id, label, decision });
+  }
+  return choices;
+}
+
+function drahtApprovalOptionIds(detail: unknown): Partial<Record<"accept" | "decline", string>> {
+  const ids: Partial<Record<"accept" | "decline", string>> = {};
+  for (const choice of drahtApprovalChoices(detail)) ids[choice.decision] = choice.id;
+  return ids;
+}
+
+/** Offer exactly Draht's choices, as long as one of them declines. */
+function drahtApprovalOptions(detail: unknown): {
+  readonly options?: ReadonlyArray<{
+    readonly decision: "accept" | "decline";
+    readonly label: string;
+  }>;
+} {
+  const choices = drahtApprovalChoices(detail);
+  return choices.some((choice) => choice.decision === "decline")
+    ? { options: choices.map(({ decision, label }) => ({ decision, label })) }
+    : {};
+}
+
 interface DrahtThreadState {
   providerThread: OrchestrationV2ProviderThread;
   activeTurn: ActiveDrahtTurn | null;
@@ -418,6 +495,37 @@ interface DrahtWake {
   readonly state: DrahtThreadState;
   readonly events: Array<DrahtRpcRecord>;
 }
+
+/** What a subagent report shows; settling a subagent re-sends its last report. */
+interface DrahtSubagentUpdate {
+  readonly title: string;
+  readonly prompt: string;
+  readonly model: string | null;
+  readonly status: OrchestrationV2Subagent["status"];
+  readonly progress: string | undefined;
+  readonly result: string | null;
+  readonly workflow: OrchestrationV2SubagentWorkflow | undefined;
+  /** Epoch milliseconds Draht reported the run or agent ending. */
+  readonly endedAt: number | undefined;
+}
+
+interface DrahtDuet {
+  readonly enabled: boolean;
+  readonly strategy: string | undefined;
+  /** The participant answering now; the lead in triage. */
+  readonly role: string | undefined;
+  readonly participants: ReadonlyArray<DrahtDuetParticipant>;
+}
+
+/** Compares and keys values that are already plain JSON data. */
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+const DRAHT_DUET_OFF: DrahtDuet = {
+  enabled: false,
+  strategy: undefined,
+  role: undefined,
+  participants: [],
+};
 
 export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
   options: DrahtAdapterV2Options,
@@ -1092,99 +1200,458 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
             ...(output === undefined ? {} : { output }),
           },
         });
-        if (toolName === "subagent") {
-          yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed);
+        if (toolName === DRAHT_SUBAGENT_TOOL || toolName === DRAHT_WORKFLOW_TOOL) {
+          yield* emitPolyphaseRun(turn, toolCallId, resultRecord, status);
+        } else if (toolName === DRAHT_DUET_DELEGATE_TOOL) {
+          yield* emitDuetDelegation(turn, toolCallId, args, resultRecord, outputText, status);
         }
       });
 
-      const emitSubagentTasks = Effect.fnUntraced(function* (
+      /**
+       * A subagent's identity is fixed by the turn that first reported it. Background workflows
+       * report again after that turn ends, so records live for the session, not the turn.
+       */
+      interface DrahtSubagentRecord {
+        readonly base: ReturnType<typeof baseItemFields>;
+        readonly rootNodeId: NodeId;
+        readonly parentNodeId: NodeId;
+        /** Agent labels whose child permission asks belong to this subagent. */
+        readonly labels: Set<string>;
+        readonly toolCallId: string | null;
+        readonly background: boolean;
+        lastUpdate: DrahtSubagentUpdate | null;
+        signature: string | null;
+      }
+
+      const subagentRecords = new Map<string, DrahtSubagentRecord>();
+      const backgroundWorkflows: Array<{ readonly name: string; readonly nativeTaskId: string }> =
+        [];
+
+      const isSettledRecord = (record: DrahtSubagentRecord): boolean =>
+        record.lastUpdate !== null && isTerminalDrahtSubagentStatus(record.lastUpdate.status);
+
+      const openSubagent = Effect.fnUntraced(function* (
         turn: ActiveDrahtTurn,
-        toolCallId: string,
-        resultRecord: unknown,
-        completed: boolean,
+        nativeTaskId: string,
+        open: {
+          readonly parentNodeId: NodeId;
+          readonly toolCallId: string | null;
+          readonly background: boolean;
+          readonly startedAt: number | undefined;
+        },
       ) {
-        const results = recordField(recordField(resultRecord, "details"), "results");
-        if (!Array.isArray(results)) return;
+        const existing = subagentRecords.get(nativeTaskId);
+        if (existing !== undefined) return existing;
         const emittedAt = yield* DateTime.now;
-        const parentNodeId = idAllocator.derive.nodeFromProviderItem({
-          driver: DRAHT_PROVIDER,
-          nativeItemId: toolCallId,
-        });
-        for (const [index, result] of results.entries()) {
-          const agent = recordString(result, "agent");
-          const task = recordString(result, "task");
-          if (agent === undefined || task === undefined) continue;
-          const nativeTaskId = `${toolCallId}:subagent:${recordNumber(result, "step") ?? index}`;
-          const subagentId = idAllocator.derive.nodeFromProviderItem({
-            driver: DRAHT_PROVIDER,
-            nativeItemId: nativeTaskId,
-          });
-          const startedAt = turn.toolStartedAt.get(nativeTaskId) ?? emittedAt;
-          turn.toolStartedAt.set(nativeTaskId, startedAt);
-          const finished = completed || recordField(result, "finished") === true;
-          const stopReason = recordString(result, "stopReason");
-          const interrupted = finished && stopReason === "aborted";
-          const failed =
-            finished &&
-            !interrupted &&
-            ((recordNumber(result, "exitCode") ?? 0) !== 0 || stopReason === "error");
-          const status = interrupted
-            ? "interrupted"
-            : failed
-              ? "failed"
-              : finished
-                ? "completed"
-                : "running";
-          const outputText = drahtSubagentOutput(result);
+        const startedAt =
+          open.startedAt === undefined
+            ? emittedAt
+            : Option.getOrElse(DateTime.make(open.startedAt), () => emittedAt);
+        const record: DrahtSubagentRecord = {
+          base: baseItemFields(turn, nativeTaskId, startedAt, emittedAt),
+          rootNodeId: turn.turnInput.rootNodeId,
+          parentNodeId: open.parentNodeId,
+          labels: new Set(),
+          toolCallId: open.toolCallId,
+          background: open.background,
+          lastUpdate: null,
+          signature: null,
+        };
+        subagentRecords.set(nativeTaskId, record);
+        return record;
+      });
+
+      const reportSubagent =
+        /* Polyphase reports arrive with every throttled tool update; avoid a span for each. */
+        Effect.fnUntraced(function* (record: DrahtSubagentRecord, update: DrahtSubagentUpdate) {
+          if (isSettledRecord(record)) return;
+          const signature = encodeJson(update);
+          if (signature === record.signature) return;
+          record.signature = signature;
+          record.lastUpdate = update;
+          const emittedAt = yield* DateTime.now;
+          const settled = isTerminalDrahtSubagentStatus(update.status);
+          const completedAt = !settled
+            ? null
+            : update.endedAt === undefined
+              ? emittedAt
+              : Option.getOrElse(DateTime.make(update.endedAt), () => emittedAt);
+          const { base } = record;
           const progress =
-            !finished && outputText.length > 0 ? { progress: outputText.slice(0, 200) } : {};
-          const resultText = finished && outputText.length > 0 ? outputText.slice(0, 10_000) : null;
+            settled || update.progress === undefined ? {} : { progress: update.progress };
           yield* emit({
             type: "subagent.updated",
             driver: DRAHT_PROVIDER,
             subagent: {
-              id: subagentId,
-              threadId: turn.turnInput.threadId,
-              runId: turn.turnInput.runId,
-              parentNodeId,
+              id: base.nodeId,
+              threadId: base.threadId,
+              runId: base.runId,
+              parentNodeId: record.parentNodeId,
               origin: "provider_native",
               createdBy: "agent",
               driver: DRAHT_PROVIDER,
               providerInstanceId: options.instanceId,
-              providerThreadId: turn.turnInput.providerThread.id,
+              providerThreadId: base.providerThreadId,
               childThreadId: null,
-              nativeTaskRef: providerRef(nativeTaskId),
-              prompt: task,
-              title: agent,
-              model: recordString(result, "model") ?? null,
-              status,
+              nativeTaskRef: base.nativeItemRef,
+              prompt: update.prompt,
+              title: update.title,
+              model: update.model,
+              status: update.status,
               ...progress,
-              result: resultText,
-              startedAt,
-              completedAt: finished ? emittedAt : null,
+              ...(update.workflow === undefined ? {} : { workflow: update.workflow }),
+              result: update.result,
+              startedAt: base.startedAt,
+              completedAt,
               updatedAt: emittedAt,
+            },
+          });
+          yield* emit({
+            type: "node.updated",
+            driver: DRAHT_PROVIDER,
+            node: {
+              id: base.nodeId,
+              threadId: base.threadId,
+              runId: base.runId,
+              parentNodeId: record.parentNodeId,
+              rootNodeId: record.rootNodeId,
+              kind: "subagent",
+              status: update.status,
+              countsForRun: false,
+              providerThreadId: base.providerThreadId,
+              providerTurnId: base.providerTurnId,
+              nativeItemRef: base.nativeItemRef,
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: base.startedAt,
+              completedAt,
             },
           });
           yield* emit({
             type: "turn_item.updated",
             driver: DRAHT_PROVIDER,
             turnItem: {
-              ...baseItemFields(turn, nativeTaskId, startedAt, emittedAt),
-              status,
-              title: agent,
-              completedAt: finished ? emittedAt : null,
+              ...base,
+              updatedAt: emittedAt,
+              status: update.status,
+              title: update.title,
+              completedAt,
               type: "subagent",
-              subagentId,
+              subagentId: base.nodeId,
               origin: "provider_native",
               driver: DRAHT_PROVIDER,
               providerInstanceId: options.instanceId,
               childThreadId: null,
-              prompt: task,
+              prompt: update.prompt,
               ...progress,
-              result: resultText,
+              result: update.result,
             },
           });
+        });
+
+      /** Re-sends each open matching subagent's last report with a terminal status. */
+      const settleSubagents = Effect.fnUntraced(function* (
+        matches: (record: DrahtSubagentRecord) => boolean,
+        status: DrahtTerminalSubagentStatus,
+      ) {
+        for (const record of subagentRecords.values()) {
+          if (!matches(record) || record.lastUpdate === null || isSettledRecord(record)) continue;
+          yield* reportSubagent(record, { ...record.lastUpdate, status, progress: undefined });
         }
+      });
+
+      const forgetSettledSubagents = () => {
+        for (const [nativeTaskId, record] of subagentRecords) {
+          if (isSettledRecord(record)) subagentRecords.delete(nativeTaskId);
+        }
+      };
+
+      /**
+       * A `workflow` run is one subagent whose members are its agents; a `subagent` run reports
+       * each agent as its own subagent, as its single, parallel, and chain modes run independent
+       * tasks.
+       */
+      const emitPolyphaseRun = Effect.fnUntraced(function* (
+        turn: ActiveDrahtTurn,
+        toolCallId: string,
+        resultRecord: unknown,
+        toolStatus: "running" | "completed" | "failed" | "interrupted",
+      ) {
+        const details = parseDrahtPolyphaseDetails(recordField(resultRecord, "details"));
+        if (details === null) {
+          // A tool call that failed before the run started ends without polyphase details.
+          if (toolStatus !== "running") {
+            yield* settleSubagents((record) => record.toolCallId === toolCallId, toolStatus);
+          }
+          return;
+        }
+        const parentNodeId = idAllocator.derive.nodeFromProviderItem({
+          driver: DRAHT_PROVIDER,
+          nativeItemId: toolCallId,
+        });
+        const reportedStatus = drahtRunStatus(details.status);
+        // Final details always settle the run; a stopped or failed call can end without them.
+        const runStatus =
+          toolStatus === "running" || isTerminalDrahtSubagentStatus(reportedStatus)
+            ? reportedStatus
+            : toolStatus;
+        if (details.kind === "workflow") {
+          const record = yield* openSubagent(turn, `${toolCallId}:workflow`, {
+            parentNodeId,
+            toolCallId,
+            background: false,
+            startedAt: details.startedAt,
+          });
+          for (const agent of details.agents) record.labels.add(agent.label);
+          const settled = isTerminalDrahtSubagentStatus(runStatus);
+          yield* reportSubagent(record, {
+            title: details.title,
+            prompt: drahtRunPrompt(details),
+            model: null,
+            status: runStatus,
+            progress: drahtRunProgress(details),
+            result: settled ? (drahtRunResult(details) ?? null) : null,
+            workflow: drahtWorkflowProgress(details, record.lastUpdate?.workflow),
+            endedAt: details.endedAt,
+          });
+          return;
+        }
+        for (const agent of details.agents) {
+          const record = yield* openSubagent(turn, `${toolCallId}:agent:${agent.i}`, {
+            parentNodeId,
+            toolCallId,
+            background: false,
+            startedAt: agent.startedAt,
+          });
+          record.labels.add(agent.label);
+          const reported = drahtAgentStatus(agent.status);
+          const status =
+            isTerminalDrahtSubagentStatus(runStatus) && !isTerminalDrahtSubagentStatus(reported)
+              ? runStatus
+              : reported;
+          const settled = isTerminalDrahtSubagentStatus(status);
+          yield* reportSubagent(record, {
+            title: agent.label.trim() || agent.agent,
+            prompt: agent.task,
+            model: agent.model?.trim() || null,
+            status,
+            progress: drahtAgentProgress(agent),
+            result: settled ? (drahtAgentResult(agent) ?? null) : null,
+            workflow: undefined,
+            endedAt: agent.endedAt,
+          });
+        }
+        // A large run can leave settled agents out of its bounded final details.
+        if (isTerminalDrahtSubagentStatus(runStatus)) {
+          yield* settleSubagents((record) => record.toolCallId === toolCallId, runStatus);
+        }
+      });
+
+      /**
+       * Duet triage teammates run through the polyphase runner, but `duet_delegate` reports only
+       * activity lines while they run and each teammate's exit code and output section at the end.
+       */
+      const emitDuetDelegation = Effect.fnUntraced(function* (
+        turn: ActiveDrahtTurn,
+        toolCallId: string,
+        args: unknown,
+        resultRecord: unknown,
+        outputText: string,
+        toolStatus: "running" | "completed" | "failed" | "interrupted",
+      ) {
+        const assignments = parseDrahtDuetAssignments(args);
+        if (assignments.length === 0) return;
+        const parentNodeId = idAllocator.derive.nodeFromProviderItem({
+          driver: DRAHT_PROVIDER,
+          nativeItemId: toolCallId,
+        });
+        const toolEnded = toolStatus !== "running";
+        const exitCodes = toolEnded
+          ? parseDrahtDuetExitCodes(recordField(resultRecord, "details"))
+          : new Map<string, number>();
+        const sections = toolEnded ? parseDrahtDuetSections(outputText) : new Map<string, string>();
+        const activity = toolEnded ? new Map<string, string>() : parseDrahtDuetActivity(outputText);
+        for (const [index, assignment] of assignments.entries()) {
+          const record = yield* openSubagent(turn, `${toolCallId}:duet:${index}`, {
+            parentNodeId,
+            toolCallId,
+            background: false,
+            startedAt: undefined,
+          });
+          record.labels.add(assignment.participant);
+          const exitCode = exitCodes.get(assignment.participant);
+          // Draht refuses a delegation before any teammate starts (duet off, a repeat call, an
+          // unknown teammate) with an explanation and no exit codes.
+          const status = !toolEnded
+            ? "running"
+            : exitCode !== undefined
+              ? exitCode === 0
+                ? "completed"
+                : "failed"
+              : toolStatus === "completed"
+                ? "cancelled"
+                : toolStatus;
+          const result = toolEnded
+            ? (sections.get(assignment.participant) ??
+              (exitCode === undefined && outputText.trim().length > 0 ? outputText.trim() : null))
+            : null;
+          yield* reportSubagent(record, {
+            title: assignment.participant,
+            prompt: assignment.task,
+            model:
+              duet.participants.find((participant) => participant.role === assignment.participant)
+                ?.modelRef ?? null,
+            status,
+            progress: activity.get(assignment.participant),
+            result,
+            workflow: undefined,
+            endedAt: undefined,
+          });
+        }
+      });
+
+      const publishBackgroundWorkflows = (state: DrahtThreadState) =>
+        updateProviderThread(state, {
+          pendingBackgroundTasks: backgroundWorkflows.map(({ name, nativeTaskId }) => ({
+            taskId: nativeTaskId,
+            kind: "background_task" as const,
+            description: `Workflow ${name}`,
+          })),
+        });
+
+      /**
+       * A `/workflow` command announces its run and returns, so the T3 turn settles while the run
+       * continues inside Draht and reports only when it finishes.
+       */
+      const startBackgroundWorkflow = Effect.fnUntraced(function* (
+        state: DrahtThreadState,
+        turn: ActiveDrahtTurn,
+        name: string,
+      ) {
+        const nativeTaskId = `${turn.providerTurn.id}:workflow:${name}:${turn.nextItemOrdinal}`;
+        const record = yield* openSubagent(turn, nativeTaskId, {
+          parentNodeId: turn.turnInput.rootNodeId,
+          toolCallId: null,
+          background: true,
+          startedAt: undefined,
+        });
+        yield* reportSubagent(record, {
+          title: `Workflow ${name}`,
+          prompt: name,
+          model: null,
+          status: "running",
+          progress: undefined,
+          result: null,
+          workflow: { name, phases: [], agents: [] },
+          endedAt: undefined,
+        });
+        backgroundWorkflows.push({ name, nativeTaskId });
+        yield* publishBackgroundWorkflows(state);
+      });
+
+      const finishBackgroundWorkflow = Effect.fnUntraced(function* (
+        state: DrahtThreadState | null,
+        turn: ActiveDrahtTurn | null,
+        detailsValue: unknown,
+      ) {
+        const details = parseDrahtPolyphaseDetails(detailsValue);
+        if (details === null) return;
+        const name = details.workflow?.name;
+        const index = backgroundWorkflows.findIndex((workflow) => workflow.name === name);
+        const pending = index === -1 ? undefined : backgroundWorkflows[index];
+        const record =
+          pending === undefined
+            ? turn === null
+              ? undefined
+              : yield* openSubagent(turn, `${turn.providerTurn.id}:workflow:${details.runId}`, {
+                  parentNodeId: turn.turnInput.rootNodeId,
+                  toolCallId: null,
+                  background: true,
+                  startedAt: details.startedAt,
+                })
+            : subagentRecords.get(pending.nativeTaskId);
+        // Clear the roster first: once the run's last open item settles, the orchestrator asks
+        // whether background work remains and stops reading this session's events.
+        if (pending !== undefined) {
+          backgroundWorkflows.splice(index, 1);
+          if (state !== null) yield* publishBackgroundWorkflows(state);
+        }
+        if (record !== undefined) {
+          const reportedStatus = drahtRunStatus(details.status);
+          yield* reportSubagent(record, {
+            title: details.title,
+            prompt: drahtRunPrompt(details),
+            model: null,
+            status: isTerminalDrahtSubagentStatus(reportedStatus) ? reportedStatus : "completed",
+            progress: undefined,
+            result: drahtRunResult(details) ?? null,
+            workflow: drahtWorkflowProgress(details, record.lastUpdate?.workflow),
+            endedAt: details.endedAt,
+          });
+        }
+        forgetSettledSubagents();
+      });
+
+      let duet: DrahtDuet = DRAHT_DUET_OFF;
+      /** The participant last announced, so each turn names who answers it once. */
+      let duetAnnouncement: { readonly providerTurnId: string; readonly role: string } | null =
+        null;
+      /** The turn that switched duet on, which no participant answers. */
+      let duetEnablingTurnId: string | null = null;
+
+      /**
+       * Duet owns the model while it is on: it resets any other selection with a warning, so T3
+       * stops applying its own and re-applies it once duet turns off. Draht announces duet
+       * configuration changes itself; in turns strategy only its status line says who answers.
+       */
+      const updateDuet = Effect.fnUntraced(function* (next: DrahtDuet) {
+        const previous = duet;
+        duet = next;
+        if (previous.enabled && !next.enabled) {
+          appliedModel = null;
+          appliedThinking = null;
+        }
+        const turn = threadState?.activeTurn ?? null;
+        if (turn === null) return;
+        if (!previous.enabled && next.enabled) duetEnablingTurnId = turn.providerTurn.id;
+        const role = next.role;
+        if (
+          !next.enabled ||
+          next.strategy !== "turns" ||
+          role === undefined ||
+          duetEnablingTurnId === turn.providerTurn.id ||
+          (duetAnnouncement?.providerTurnId === turn.providerTurn.id &&
+            duetAnnouncement.role === role)
+        ) {
+          return;
+        }
+        duetAnnouncement = { providerTurnId: turn.providerTurn.id, role };
+        const participant = next.participants.find((candidate) => candidate.role === role);
+        yield* emitSystemNotice(
+          turn,
+          `Duet turn: ${participant === undefined ? role : formatDrahtDuetParticipant(participant)}`,
+        );
+      });
+
+      const emitSystemNotice = Effect.fnUntraced(function* (
+        turn: ActiveDrahtTurn,
+        message: string,
+      ) {
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver: DRAHT_PROVIDER,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            completedAt: emittedAt,
+            title: message,
+            type: "system_notice",
+            message,
+          },
+        });
       });
 
       const cancelPrompt = Effect.fn("DrahtAdapter.cancelPrompt")(function* (
@@ -1245,21 +1712,20 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
           const state = threadState;
           const turn = state?.activeTurn ?? null;
           const message = recordString(event, "message") ?? "";
-          if (turn === null || message.length === 0) return;
-          const emittedAt = yield* DateTime.now;
-          const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
-          yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
-          yield* emit({
-            type: "turn_item.updated",
-            driver: DRAHT_PROVIDER,
-            turnItem: {
-              ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
-              status: "completed",
-              completedAt: emittedAt,
-              title: message,
-              type: "system_notice",
-              message,
-            },
+          if (state === null || turn === null || message.length === 0) return;
+          yield* emitSystemNotice(turn, message);
+          const workflow = parseDrahtStartedWorkflow(message);
+          if (workflow !== null) yield* startBackgroundWorkflow(state, turn, workflow);
+          return;
+        }
+        if (method === "setStatus") {
+          if (recordString(event, "statusKey") !== DRAHT_DUET_STATUS_KEY) return;
+          const status = parseDrahtDuetStatus(recordString(event, "statusText"));
+          yield* updateDuet({
+            enabled: status !== null,
+            strategy: status?.strategy ?? duet.strategy,
+            role: status?.role,
+            participants: duet.participants,
           });
           return;
         }
@@ -1274,7 +1740,16 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
         }
         if (nativeRequestId === undefined) return;
         const approvalTitle = recordString(event, "title") ?? "";
-        const approvalKey = `${approvalTitle.length}:${approvalTitle}${recordString(event, "message") ?? ""}`;
+        const detail = recordField(event, "detail");
+        // Draht's gate keeps the gated command and path in `detail`, not in its generic title and
+        // message, so an approval remembered for the session must match on them too.
+        const approvalKey = encodeJson([
+          approvalTitle,
+          recordString(event, "message") ?? "",
+          ...["toolName", "command", "path", "operation", "cwd"].map((key) =>
+            recordString(detail, key),
+          ),
+        ]);
         if (method === "confirm" && sessionApprovals.has(approvalKey)) {
           yield* connection.send({
             type: "extension_ui_response",
@@ -1299,6 +1774,17 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
         });
         const nodeId = idAllocator.derive.approvalNode({ requestId });
         const title = recordString(event, "title") ?? method;
+        // Polyphase children forward their asks through this session with no run id, so they
+        // attach to the subagent only when exactly one open subagent has the asking label.
+        const childLabel = method === "confirm" ? drahtChildApprovalLabel(detail) : undefined;
+        const childOwners =
+          childLabel === undefined
+            ? []
+            : Array.from(subagentRecords.values()).filter(
+                (record) => !isSettledRecord(record) && record.labels.has(childLabel),
+              );
+        const childOwner = childOwners.length === 1 ? childOwners[0] : undefined;
+        const optionIds = method === "confirm" ? drahtApprovalOptionIds(detail) : {};
         const threadId =
           turn?.turnInput.threadId ?? state?.providerThread.appThreadId ?? input.threadId;
         const providerThreadId = state?.providerThread.id ?? null;
@@ -1318,7 +1804,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
           id: nodeId,
           threadId,
           runId: turn?.turnInput.runId ?? null,
-          parentNodeId: turn?.turnInput.rootNodeId ?? null,
+          parentNodeId: childOwner?.base.nodeId ?? turn?.turnInput.rootNodeId ?? null,
           rootNodeId: turn?.turnInput.rootNodeId ?? nodeId,
           kind: method === "confirm" ? "approval_request" : "user_input_request",
           status: "waiting",
@@ -1355,6 +1841,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
                 requestId,
                 requestKind: drahtApprovalRequestKind(event, title),
                 prompt: recordString(event, "message") ?? title,
+                ...drahtApprovalOptions(detail),
               }
             : {
                 ...itemBase,
@@ -1367,6 +1854,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
           method,
           questionId: nativeRequestId,
           approvalKey,
+          optionIds,
           expiresAt,
           expirationFiber: null,
           runtimeRequest,
@@ -1514,6 +2002,16 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
           }
         }
         yield* cancelPendingPrompts(completedAt);
+        // Tool runs end with their tool call. Background workflows keep running past the turn.
+        yield* settleSubagents(
+          (record) => !record.background && record.base.providerTurnId === turn.providerTurn.id,
+          interrupted
+            ? "interrupted"
+            : (turn.rejectedPromptFailure ?? turn.failure) === null
+              ? "completed"
+              : "failed",
+        );
+        forgetSettledSubagents();
         const treeRefs =
           turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
         const tokenUsage = readUsage
@@ -1760,8 +2258,14 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
             return;
           }
           case "message_end": {
-            if (turn === null) return;
             const message = event["message"];
+            if (recordString(message, "role") === "custom") {
+              if (recordString(message, "customType") === DRAHT_WORKFLOW_MESSAGE) {
+                yield* finishBackgroundWorkflow(state, turn, recordField(message, "details"));
+              }
+              return;
+            }
+            if (turn === null) return;
             if (recordString(message, "role") !== "assistant") return;
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
@@ -1925,6 +2429,23 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
           case "extension_ui_request":
             yield* handleExtensionUiRequest(event);
             return;
+          case "entry_appended": {
+            const duetState = parseDrahtDuetStateEntry(event["entry"]);
+            if (duetState !== null) {
+              yield* updateDuet({
+                enabled: duetState.enabled,
+                strategy: duetState.strategy,
+                role: duet.role,
+                participants: duetState.enabled ? (duetState.participants ?? []) : [],
+              });
+            }
+            return;
+          }
+          case "context_window_changed": {
+            const capacity = nonNegativeInteger(event, "contextWindow");
+            if (capacity !== undefined && capacity > 0) contextWindow = capacity;
+            return;
+          }
           case "extension_error": {
             yield* emitExtensionError(event);
             return;
@@ -2137,6 +2658,13 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
               } else {
                 yield* cancelPendingPrompts(yield* DateTime.now);
               }
+              // Background workflows run inside the Draht process and end with it. Clear the
+              // roster before settling, as ingestion stops once no open work remains.
+              if (backgroundWorkflows.length > 0) {
+                backgroundWorkflows.length = 0;
+                if (state !== null) yield* publishBackgroundWorkflows(state);
+              }
+              yield* settleSubagents(() => true, "interrupted");
               if (unsolicitedActivityDetected) {
                 yield* updateProviderSession("error", DRAHT_UNSOLICITED_ACTIVITY_ERROR);
                 yield* Queue.end(events);
@@ -2284,6 +2812,16 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
         );
         lastKnownLeaf = recordString(baselineEntries, "leafId") ?? null;
         leafCursorStale = baselineEntries === undefined;
+        const branchDuet = latestDrahtDuetState(baselineEntries);
+        duet =
+          branchDuet === null || !branchDuet.enabled
+            ? DRAHT_DUET_OFF
+            : {
+                enabled: true,
+                strategy: branchDuet.strategy,
+                role: undefined,
+                participants: branchDuet.participants ?? [],
+              };
         if (publish)
           yield* emit({
             type: "provider_thread.updated",
@@ -2294,6 +2832,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
       });
 
       const applySelection = Effect.fnUntraced(function* (modelSelection: ModelSelection) {
+        if (duet.enabled) return;
         const thinking = getModelSelectionStringOptionValue(modelSelection, "thinking");
         if (modelSelection.model === DRAHT_INHERIT_MODEL_SLUG) {
           if (appliedModel !== null && baselineModel !== null) {
@@ -2381,11 +2920,17 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
-        hasPendingBackgroundWork: Effect.sync(() => pendingWake !== null),
+        hasPendingBackgroundWork: Effect.sync(
+          () => pendingWake !== null || backgroundWorkflows.length > 0,
+        ),
         hasPendingBackgroundWorkForThread: (providerThread) =>
           Effect.sync(
-            () => pendingWake !== null && pendingWake.state.providerThread.id === providerThread.id,
+            () =>
+              (pendingWake !== null && pendingWake.state.providerThread.id === providerThread.id) ||
+              (backgroundWorkflows.length > 0 &&
+                threadState?.providerThread.id === providerThread.id),
           ),
+        backgroundTasksEndWithProcess: true,
         getModelContextWindow: (selection) => {
           if (selection.instanceId !== options.instanceId) return undefined;
           const slug =
@@ -2691,6 +3236,11 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
             if (turn === null && interruptInput.requestRuntimeRestart === true) {
               if (pendingWake !== null)
                 yield* sessionEventPermit.withPermits(1)(stopPendingWake(pendingWake));
+              // Draht has no command that cancels a detached workflow; it ends with the process.
+              if (backgroundWorkflows.length > 0) {
+                stopRequested = true;
+                yield* connection.terminate;
+              }
               return;
             }
             if (turn === null || turn.providerTurn.id !== interruptInput.providerTurnId) {
@@ -3296,27 +3846,6 @@ function drahtUncapturedForkEntry(
   return earliest;
 }
 
-function drahtSubagentOutput(result: unknown): string {
-  const stopReason = recordString(result, "stopReason");
-  const failed =
-    (recordNumber(result, "exitCode") ?? 0) !== 0 ||
-    stopReason === "error" ||
-    stopReason === "aborted";
-  if (failed) {
-    const failure = recordString(result, "errorMessage") || recordString(result, "stderr");
-    if (failure !== undefined && failure.length > 0) return failure;
-  }
-  const messages = recordField(result, "messages");
-  if (!Array.isArray(messages)) return "";
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (recordString(message, "role") !== "assistant") continue;
-    const text = contentText(recordField(message, "content"));
-    if (text.length > 0) return text;
-  }
-  return "";
-}
-
 function drahtExtensionDisplayName(extensionPath: string | undefined): string {
   if (extensionPath === undefined) return "Draht extension";
   const normalized = extensionPath.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -3374,8 +3903,12 @@ function drahtUiResponse(
   answers: Record<string, unknown> | undefined,
 ): DrahtRpcRecord {
   if (pending.method === "confirm") {
-    if (decision === "accept" || decision === "acceptForSession") return { confirmed: true };
-    if (decision === "decline") return { confirmed: false };
+    // Where Draht offered options, the chosen option's id decides, not `confirmed`.
+    const optionId = (id: string | undefined) => (id === undefined ? {} : { optionId: id });
+    if (decision === "accept" || decision === "acceptForSession") {
+      return { confirmed: true, ...optionId(pending.optionIds.accept) };
+    }
+    if (decision === "decline") return { confirmed: false, ...optionId(pending.optionIds.decline) };
     return { cancelled: true };
   }
   const answer = answers?.[pending.questionId];

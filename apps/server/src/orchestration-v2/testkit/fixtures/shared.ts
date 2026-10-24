@@ -262,6 +262,10 @@ export type OrchestratorFixtureInputStep =
       readonly targetRunIndex: number;
     }
   | {
+      /** Waits until the provider thread lists no background work, e.g. a detached workflow. */
+      readonly type: "await_background_work";
+    }
+  | {
       readonly type: "release_replay_gate_after_waiting";
       readonly label: string;
       readonly targetRunIndex: number;
@@ -654,6 +658,9 @@ export function materializeFixtureInput(input: {
             threadId: ids.threadId,
             runId: runIdFor(step.targetRunIndex),
           });
+          break;
+        case "await_background_work":
+          steps.push({ type: "await_no_background_work", threadId: ids.threadId });
           break;
         case "await_run_status":
           steps.push({
