@@ -36,8 +36,20 @@ import { claudeMcpToolPresentationInput } from "./claude_mcp_tool_presentation/i
 import { assertClaudeMcpToolPresentationOutput } from "./claude_mcp_tool_presentation/output.ts";
 import { claudeResultIsErrorInput } from "./claude_result_is_error/input.ts";
 import { assertClaudeResultIsErrorOutput } from "./claude_result_is_error/output.ts";
+import { drahtDuetInput } from "./draht_duet/input.ts";
+import { assertDrahtDuetOutput } from "./draht_duet/output.ts";
+import { drahtDuetTurnsInput } from "./draht_duet_turns/input.ts";
+import { assertDrahtDuetTurnsOutput } from "./draht_duet_turns/output.ts";
 import { DRAHT_PERMISSION_DECLINED_FILE, drahtPermissionInput } from "./draht_permission/input.ts";
 import { assertDrahtPermissionOutput } from "./draht_permission/output.ts";
+import { drahtSubagentApprovalInput } from "./draht_subagent_approval/input.ts";
+import { assertDrahtSubagentApprovalOutput } from "./draht_subagent_approval/output.ts";
+import { drahtSubagentsInput } from "./draht_subagents/input.ts";
+import { assertDrahtSubagentsOutput } from "./draht_subagents/output.ts";
+import { drahtWorkflowCommandInput } from "./draht_workflow_command/input.ts";
+import { assertDrahtWorkflowCommandOutput } from "./draht_workflow_command/output.ts";
+import { drahtWorkflowCommandStopInput } from "./draht_workflow_command_stop/input.ts";
+import { assertDrahtWorkflowCommandStopOutput } from "./draht_workflow_command_stop/output.ts";
 import { grokAutoBlockedCommandInput } from "./grok_auto_blocked_command/input.ts";
 import { assertGrokAutoBlockedCommandOutput } from "./grok_auto_blocked_command/output.ts";
 import { grokBackgroundBashInput } from "./grok_background_bash/input.ts";
@@ -1267,6 +1279,87 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: DRAHT_MODEL_SELECTION,
         expectedAbsentWorkspacePaths: [DRAHT_PERMISSION_DECLINED_FILE],
         assertOutput: assertDrahtPermissionOutput,
+      },
+    ],
+  },
+  {
+    name: "draht_subagents",
+    buildInput: drahtSubagentsInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL("./draht_subagents/draht_transcript.ndjson", import.meta.url),
+        modelSelection: DRAHT_MODEL_SELECTION,
+        assertOutput: assertDrahtSubagentsOutput,
+      },
+    ],
+  },
+  {
+    name: "draht_workflow_command",
+    buildInput: drahtWorkflowCommandInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL(
+          "./draht_workflow_command/draht_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: DRAHT_MODEL_SELECTION,
+        assertOutput: assertDrahtWorkflowCommandOutput,
+      },
+    ],
+  },
+  {
+    name: "draht_workflow_command_stop",
+    buildInput: drahtWorkflowCommandStopInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL(
+          "./draht_workflow_command_stop/draht_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: DRAHT_MODEL_SELECTION,
+        assertOutput: assertDrahtWorkflowCommandStopOutput,
+      },
+    ],
+  },
+  {
+    name: "draht_subagent_approval",
+    buildInput: drahtSubagentApprovalInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL(
+          "./draht_subagent_approval/draht_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: DRAHT_MODEL_SELECTION,
+        assertOutput: assertDrahtSubagentApprovalOutput,
+      },
+    ],
+  },
+  {
+    name: "draht_duet",
+    buildInput: drahtDuetInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL("./draht_duet/draht_transcript.ndjson", import.meta.url),
+        modelSelection: DRAHT_MODEL_SELECTION,
+        assertOutput: assertDrahtDuetOutput,
+      },
+    ],
+  },
+  {
+    name: "draht_duet_turns",
+    buildInput: drahtDuetTurnsInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("draht"),
+        transcriptFile: new URL("./draht_duet_turns/draht_transcript.ndjson", import.meta.url),
+        modelSelection: DRAHT_MODEL_SELECTION,
+        assertOutput: assertDrahtDuetTurnsOutput,
       },
     ],
   },

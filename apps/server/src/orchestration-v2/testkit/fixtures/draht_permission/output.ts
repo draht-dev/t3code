@@ -80,10 +80,15 @@ export function assertDrahtPermissionOutput(
     entry.type === "expect_outbound" &&
     isRecord(entry.frame) &&
     entry.frame.type === "extension_ui_response"
-      ? [entry.frame.confirmed]
+      ? [[entry.frame.confirmed, entry.frame.optionId]]
       : [],
   );
-  assert.deepEqual(answers, [true, false, true]);
+  // Draht's gate is answered by its own option ids; the extension's ask offers none.
+  assert.deepEqual(answers, [
+    [true, "approve"],
+    [false, "deny"],
+    [true, undefined],
+  ]);
 
   const shells = projection.turnItems.filter((item) => item.type === "command_execution");
   assert.isTrue(

@@ -41,8 +41,22 @@ Draht loads its normal user and project extensions. Blocking `select`, `confirm`
 `editor` dialogs work in T3 Code. Notifications appear in the work log. Draht terminal decoration
 such as titles, status lines, and widgets does not have a T3 Code equivalent.
 
-Subagent and workflow runs appear as tool calls in the thread, and the approvals their agents need
-reach you in the conversation.
+## Subagents, Workflows, and Duet
+
+Draht's subagent runs appear in the thread as subagents, one per agent, with each agent's model,
+progress, and result. A workflow run appears as one workflow with its phases and agents. Draht runs
+these agents without saved sessions, so they cannot be opened as threads.
+
+A `/workflow` command, or a saved workflow's own command, keeps running after its turn ends. The
+thread shows it as background work until the result arrives. Stopping that background work stops
+the Draht process, which ends the workflow; the next message resumes the conversation.
+
+On Draht 2026.10.19 and newer, a subagent or workflow agent that needs permission asks in the
+conversation, under the agent that asked. Earlier releases block those tool calls.
+
+In duet triage, the teammates the lead delegates to appear as subagents with their own models.
+While duet mode is on it chooses the model for every turn, so T3 Code's model selection applies
+again after `/duet off`. In turns strategy, a notice names the participant answering each turn.
 
 ## Permission Modes
 
