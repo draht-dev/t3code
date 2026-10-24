@@ -25,6 +25,11 @@ Providers enforce permissions differently. Some read-only actions can proceed in
 including OpenCode and Antigravity, fall back to asking. On Grok, commands its review blocks come
 to you for approval.
 
+Draht enforces every mode with its own permission rules, and their deny rules also apply in
+**Full access**. **Auto** uses Draht's command danger filter. In the other modes, Draht asks before
+tools that no rule covers, including T3 Code's own tools. See
+[Draht permission modes](./providers-draht.md#permission-modes).
+
 Muse Code offers only **Supervised** and **Full access**. A Muse thread already set to another mode
 runs in **Supervised**.
 

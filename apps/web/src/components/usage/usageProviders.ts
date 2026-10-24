@@ -40,6 +40,11 @@ export const PROVIDER_PRESENTATION = {
     color: "#4d9f8a",
     driverKind: ProviderDriverKind.make("pi"),
   },
+  draht: {
+    label: "Draht",
+    color: "#c2703d",
+    driverKind: ProviderDriverKind.make("draht"),
+  },
   muse: {
     label: "Muse Code",
     color: "#0866ff",
