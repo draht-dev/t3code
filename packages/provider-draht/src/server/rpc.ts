@@ -333,34 +333,31 @@ export const makeDrahtRpcConnection = Effect.fnUntraced(function* (options: Drah
   }).pipe(
     Effect.matchCauseEffect({
       onFailure: (cause) => failTransport(new DrahtRpcError({ operation: "read", cause })),
-      onSuccess: () =>
-        Effect.gen(function* () {
-          // Claim the stdout-close path before waiting so a broken stdin
-          // writer cannot replace the exit diagnosis with a write error.
-          diagnosingStdoutClose = true;
-          const polled = yield* Deferred.poll(exitDeferred);
-          const maybeExitCode = Option.isSome(polled)
-            ? yield* polled.value.pipe(
-                Effect.map(Option.some),
-                Effect.orElseSucceed(() => Option.none<number>()),
-              )
-            : yield* Deferred.await(exitDeferred).pipe(
-                Effect.timeoutOption(Duration.millis(250)),
-                // Adapter tests run under TestClock. A planned stdout close
-                // without an exit, for example Stop-with-restart, must not wait
-                // on that clock or the transport never fails.
-                Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
-                Effect.orElseSucceed(() => Option.none<number>()),
-              );
-          return yield* failTransport(
-            new DrahtRpcError({
-              operation: "read",
-              detail: describeDrahtStdoutClosure(
-                Option.isSome(maybeExitCode) ? maybeExitCode.value : undefined,
-              ),
-            }),
-          );
-        }),
+      // The enclosing operation owns the span for this inline handler.
+      onSuccess: Effect.fnUntraced(function* () {
+        // Claim stdout-close diagnosis before waiting so broken stdin cannot replace the exit error.
+        diagnosingStdoutClose = true;
+        const polled = yield* Deferred.poll(exitDeferred);
+        const maybeExitCode = Option.isSome(polled)
+          ? yield* polled.value.pipe(
+              Effect.asSome,
+              Effect.orElseSucceed(() => Option.none<number>()),
+            )
+          : yield* Deferred.await(exitDeferred).pipe(
+              Effect.timeoutOption(Duration.millis(250)),
+              // Stdout-close waits need wall time; TestClock would strand Stop-with-restart without an exit.
+              Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+              Effect.orElseSucceed(() => Option.none<number>()),
+            );
+        return yield* failTransport(
+          new DrahtRpcError({
+            operation: "read",
+            detail: describeDrahtStdoutClosure(
+              Option.isSome(maybeExitCode) ? maybeExitCode.value : undefined,
+            ),
+          }),
+        );
+      }),
     }),
     Effect.forkIn(scope),
   );

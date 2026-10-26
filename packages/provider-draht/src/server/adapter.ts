@@ -548,8 +548,12 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: DRAHT_PROVIDER,
-    getCapabilities: () => Effect.succeed(DrahtProviderCapabilitiesV2),
-    planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
+    getCapabilities: Effect.fn("DrahtAdapter.getCapabilities")(function () {
+      return Effect.succeed(DrahtProviderCapabilitiesV2);
+    }),
+    planSelectionTransition: Effect.fn("DrahtAdapter.planSelectionTransition")(function () {
+      return Effect.succeed(turnScopedSelectionTransition());
+    }),
     openSession: Effect.fn("DrahtAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
@@ -2196,10 +2200,10 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
                       Effect.suspend(() =>
                         pendingWake === wake && threadState === state && !closed
                           ? dispatch.pipe(
-                              Effect.map(Option.some),
+                              Effect.asSome,
                               Effect.tapError(() => stopPendingWake(wake)),
                             )
-                          : Effect.succeed(Option.none()),
+                          : Effect.succeedNone,
                       ),
                     ),
                   clearIfCurrent: () => sessionEventPermit.withPermits(1)(stopPendingWake(wake)),
@@ -2331,11 +2335,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
               }
               return;
             }
-            // An overflow can surface as a model error (`message_end` with
-            // stopReason error) before Draht compacts and retries the turn. Clear
-            // that failure only when Draht confirms that compaction will retry;
-            // a successful non-retrying compaction must not erase an exhausted
-            // provider retry.
+            // Clear overflow failures only when compaction will retry; ordinary compaction must retain exhausted retries.
             if (event["willRetry"] === true) turn.failure = null;
             turn.latestCompactionAfterTokens =
               nonNegativeInteger(result, "estimatedTokensAfter") ?? null;
@@ -2516,11 +2516,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
             const responseTurn =
               pendingPrompt?.providerTurnId === turn?.providerTurn.id ? turn : null;
             if (event["success"] === true) {
-              // Deferred success ack. Command-only prompts (pure extension
-              // slash commands) never start an agent run and never emit
-              // `agent_settled`, so probe for idleness. The probe result is
-              // re-queued behind any events Draht emitted before answering
-              // get_state, which keeps the check stream-ordered.
+              // Command-only prompts emit no agent_settled; probe idle and re-queue behind preceding native events.
               if (
                 pendingPrompt?.kind === "turn_start" &&
                 responseTurn !== null &&
@@ -3013,13 +3009,8 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
                 Effect.ignore,
               );
             }
-            // Resolved before the turn is installed: a failure here (an
-            // unreadable attachment) must not leave `activeTurn` set, which
-            // would reject every later turn as already active.
-            // Orchestration instructions reach draht through the T3 MCP
-            // extension's before_agent_start system-prompt hook, never by
-            // wrapping the user text: a wrapped first message would no
-            // longer start with "/" and slash commands would stop expanding.
+            // Resolve attachments before turn installation so failures cannot strand activeTurn.
+            // Inject instructions through before_agent_start; wrapping user text breaks slash-command expansion.
             const compactCommand = continuation
               ? null
               : parseDrahtCompactCommand(turnInput.message.text);
@@ -3180,13 +3171,8 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
                     steerInput.message.attachments,
                   )
                 : null;
-            // Prompt with streamingBehavior steer is atomic on Draht's side: it
-            // queues during an active run and starts a new run if settlement
-            // won the race. A direct `steer` sent after Draht became idle would
-            // remain queued forever. Send fire-and-forget under the session
-            // permit so a slash-command dialog cannot block the turn, and so
-            // settlement cannot overtake the active-turn check.
-            // /compact is not a prompt: Draht's compact RPC aborts the agent first.
+            // prompt with steer atomically queues or starts; fire-and-forget under the permit avoids dialog deadlocks.
+            // /compact uses its RPC, which aborts the agent first.
             yield* sessionEventPermit.withPermits(1)(
               Effect.gen(function* () {
                 if (threadState?.activeTurn !== turn) {

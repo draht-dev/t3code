@@ -1,10 +1,7 @@
 /**
- * Draht runs subagents and workflows through its polyphase runner. Tool runs report
- * `PolyphaseDetails` (v1) on every `subagent` and `workflow` tool update and result, a `/workflow`
- * command reports its finished run as a `polyphase-workflow` custom message, and duet triage
- * delegates through `duet_delegate`, which reports only per-teammate exit codes. The shapes mirror
- * Draht's `core/polyphase/types.ts` and `core/builtins/duet.ts`; unknown fields are ignored and an
- * unknown status reads as still running, so a newer Draht degrades instead of dropping the run.
+ * Draht reports `subagent`/`workflow` tool runs as `PolyphaseDetails` v1, a `/workflow` command's
+ * finished run as a `polyphase-workflow` custom message, and `duet_delegate` only as exit codes.
+ * Unknown fields are ignored and unknown statuses read as running, so newer Draht degrades.
  */
 import type {
   OrchestrationV2Subagent,

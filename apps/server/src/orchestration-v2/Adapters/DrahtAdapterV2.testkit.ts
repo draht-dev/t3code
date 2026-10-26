@@ -181,13 +181,7 @@ interface DrahtReplayProcess {
   open: boolean;
 }
 
-/**
- * Independent adapter fibers (skill discovery beside thread setup, a settle
- * probe beside a steer) can reach stdin in a different order than recorded, so
- * a write that matches a later outbound record of the same turn is held until
- * the transcript reaches it. A write that matches nothing before the next
- * turn-starting record fails immediately.
- */
+/** Adapter fibers can reorder stdin writes; hold matches within the turn until reached, and fail unmatched writes. */
 class DrahtReplayController {
   private cursor = 0;
   private failure: unknown = null;
