@@ -262,6 +262,10 @@ export type OrchestratorFixtureInputStep =
       readonly targetRunIndex: number;
     }
   | {
+      /** Waits until the provider thread lists no background work, e.g. a detached workflow. */
+      readonly type: "await_background_work";
+    }
+  | {
       readonly type: "release_replay_gate_after_waiting";
       readonly label: string;
       readonly targetRunIndex: number;
@@ -368,6 +372,12 @@ export const OPENCODE2_MODEL_SELECTION = {
 export const PI_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("pi"),
   model: "openrouter/deepseek/deepseek-v4-flash",
+} satisfies ModelSelection;
+
+export const DRAHT_MODEL_SELECTION = {
+  instanceId: ProviderInstanceId.make("draht"),
+  model: "anthropic/claude-haiku-4-5",
+  options: [{ id: "thinking", value: "low" }],
 } satisfies ModelSelection;
 
 export const ACP_REGISTRY_MODEL_SELECTION = {
@@ -648,6 +658,9 @@ export function materializeFixtureInput(input: {
             threadId: ids.threadId,
             runId: runIdFor(step.targetRunIndex),
           });
+          break;
+        case "await_background_work":
+          steps.push({ type: "await_no_background_work", threadId: ids.threadId });
           break;
         case "await_run_status":
           steps.push({
