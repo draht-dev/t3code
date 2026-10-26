@@ -36,7 +36,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     # The build workflow completes for every PR push (its label gate is on the
     # job), so this runs often and usually finds nothing. Keep it cheap.
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       actions: read
@@ -500,7 +500,7 @@ jobs:
       (github.event.action == 'closed' ||
       (github.event.action == 'unlabeled' && github.event.label.name == 'preview:mac'))
     # Runs on every PR close and usually finds nothing. Keep it cheap.
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     # Cleanup runs must complete: a close event right after an unlabel queues
     # behind the running cleanup instead of canceling it mid-delete.
