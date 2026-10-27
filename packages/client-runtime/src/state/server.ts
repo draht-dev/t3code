@@ -1305,8 +1305,8 @@ export function createServerEnvironmentAtoms<R, E>(
     searchAcpRegistry: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:acp-registry:search",
       tag: WS_METHODS.serverSearchAcpRegistry,
-      staleTimeMs: 0,
-      idleTtlMs: 0,
+      // Reopening Add provider reuses recent results; submitting the same search refreshes it.
+      staleTimeMs: 5 * 60_000,
     }),
     configProjection,
     welcome,
@@ -1519,6 +1519,16 @@ export function createServerEnvironmentAtoms<R, E>(
     answerSecretRequest: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:secrets:answer-request",
       tag: WS_METHODS.secretsAnswerRequest,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.threadId, input.turnItemId]),
+      },
+    }),
+    // Like a secret card's answer: off the config lane, one per card at a time.
+    answerLinkRequest: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:peer-links:answer-request",
+      tag: WS_METHODS.peerLinksAnswerRequest,
       concurrency: {
         mode: "singleFlight",
         key: ({ environmentId, input }) =>
