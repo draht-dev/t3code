@@ -61,6 +61,7 @@ import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRe
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
+import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import { BUILT_IN_SOURCE_CONTROL_DRIVER_LIST } from "./sourceControl/sourceControlDefinitions.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
@@ -170,6 +171,7 @@ import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
+import * as TriageService from "./triage/TriageService.ts";
 import * as DesktopTelemetryReceiver from "./resourceTelemetry/DesktopTelemetryReceiver.ts";
 import * as NativeTelemetryClient from "./resourceTelemetry/NativeTelemetryClient.ts";
 import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts";
@@ -418,6 +420,9 @@ const layerVcs = Layer.empty.pipe(
   Layer.provideMerge(layerGitWorkflow),
   Layer.provideMerge(layerReview),
   Layer.provideMerge(layerSourceControlRepositoryService),
+  Layer.provideMerge(
+    SourceControlSignIn.layer.pipe(Layer.provide(layerSourceControlProviderRegistry)),
+  ),
   Layer.provideMerge(layerProjectCloneTracker),
   Layer.provideMerge(
     VcsStatusBroadcaster.layer.pipe(
@@ -693,6 +698,7 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(layerBackground),
   Layer.provideMerge(layerResourceDiagnostics),
   Layer.provideMerge(TraceDiagnostics.layer),
+  Layer.provideMerge(TriageService.layer.pipe(Layer.provide(GitVcsDriver.layer))),
   Layer.provideMerge(AnalyticsService.layer),
   Layer.provideMerge(ExternalLauncher.layer),
   Layer.provideMerge(RemoteOpenTargets.layer),

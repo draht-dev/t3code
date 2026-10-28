@@ -26,7 +26,9 @@ import {
   resolveThreadWorkingStartedAt,
 } from "@t3tools/client-runtime/state/models";
 import { AuthOrchestrationOperateScope, type EnvironmentMachineKind } from "@t3tools/contracts";
+import type { SnoozePresetSetting } from "@t3tools/contracts/settings";
 import { canSnooze } from "@t3tools/client-runtime/state/thread-settled";
+import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useMemo, useState, type ComponentProps } from "react";
 import { Pressable, useWindowDimensions, View } from "react-native";
@@ -42,6 +44,7 @@ import { ProviderIcon, ProviderInstanceIcon } from "../../components/ProviderIco
 import { useNowAfter } from "../../lib/clock";
 import { cn } from "../../lib/cn";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
+import { copyThreadReference } from "../../lib/copyThreadReference";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useEnvironmentScope } from "../../state/session";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
@@ -238,7 +241,7 @@ function ThreadListV2Section(props: {
   );
 }
 
-export const ThreadListV2SectionDivider = memo(function ThreadListV2SectionDivider(props: {
+const ThreadListV2SectionDivider = memo(function ThreadListV2SectionDivider(props: {
   readonly label: string;
   readonly pane?: "screen" | "sidebar";
 }) {
@@ -609,6 +612,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly onSetThreadAutoSettle: (thread: EnvironmentThreadShell, enabled: boolean) => void;
   readonly settlementSupported: boolean;
   readonly snoozeSupported: boolean;
+  readonly snoozePresets: ReadonlyArray<SnoozePresetSetting> | undefined;
   readonly pinningSupported: boolean;
   readonly autoSettleOptOutSupported: boolean;
   readonly titleRegenerationSupported: boolean;
@@ -760,6 +764,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const snoozePresets = resolveThreadListV2SnoozePresets({
     secondary: swipeActions.secondary,
     now: props.snoozePresetMinute || snoozeGateNow,
+    presets: props.snoozePresets,
   });
   const snoozePresetActions = useMemo<MenuAction[]>(
     () => [
@@ -918,6 +923,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "archive") handleArchive();
       if (nativeEvent.event === "rename") handleRename();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
+      if (nativeEvent.event === "copy-thread") {
+        const target = threadChipCopyTarget(
+          { environmentId: thread.environmentId, threadId: thread.id },
+          thread.title,
+        );
+        void copyThreadReference(target).then((didCopy) => {
+          if (!didCopy) Dialog.alert(target.failureTitle, "Try copying this thread again.");
+        });
+      }
       if (nativeEvent.event === "copy-thread-id") {
         copyTextWithHaptic(thread.id, { target: "thread-id" });
       }
@@ -930,6 +944,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         event: nativeEvent.event,
         displayedPresets: snoozePresets,
         now: new Date(),
+        presets: props.snoozePresets,
       });
       if (snoozeSelection._tag === "selected") {
         handleSnooze(snoozeSelection.preset.snoozedUntil);
@@ -958,6 +973,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleUnsnooze,
       setCustomSnoozeOpen,
       snoozePresets,
+      props.snoozePresets,
     ],
   );
   const primaryAction = useMemo(() => {
@@ -1406,6 +1422,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                     },
                   ]
                 : []),
+              { id: "copy-thread", title: "Copy thread", image: "text.bubble" },
               { id: "copy-thread-id", title: "Copy thread ID", image: "doc.on.doc" },
               ...(snoozedRow
                 ? snoozedMenuActions
