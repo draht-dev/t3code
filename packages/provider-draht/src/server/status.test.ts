@@ -87,7 +87,7 @@ const drahtDiscoverySpawner = (
     );
     return ChildProcessSpawner.make((command) => {
       const args = ChildProcess.isStandardCommand(command) ? command.args : [];
-      if (!args.includes("--version")) rpcArgs.push(args);
+      if (!args.includes("--version")) rpcArgs.push(args.map(String));
       return Effect.succeed(
         args.includes("--version")
           ? processHandle({ stdout: `${version}\n` })
