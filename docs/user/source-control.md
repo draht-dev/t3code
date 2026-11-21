@@ -338,7 +338,7 @@ review is terminal. An open or unsynced link keeps it active.
 
 Ask the agent to watch, monitor, or babysit a pull request and it calls `watch_pull_request`. While
 the thread is active, the server checks the pull request every two minutes and wakes the agent when a
-check fails or waits for a maintainer's approval, the required checks pass, someone else comments or reviews, or the branch starts to
+check fails or waits for a maintainer's approval, the required checks pass, the other checks finish after a failure, someone else comments or reviews, or the branch starts to
 conflict. On github.com it also wakes the agent, with GitHub's reason, when the merge queue drops
 the pull request without merging it. Threads in a project that watch the same pull request share one check. On GitHub, a check
 first asks whether anything changed and reads the pull request only when it did, which keeps
@@ -375,8 +375,11 @@ The search box asks the tracker itself where it can search. Press **Load more** 
 The **Views** menu saves and restores a search, filter, and sort setup, as it does for pull
 requests.
 
-To list a Linear team's issues beside a project's, connect Linear with an API key under
-Settings → Source control & issues, then choose the team for that project there.
+To list Linear issues beside a project's, connect Linear with an API key under
+Settings → Source control & issues, then pick one or more teams for that project there. Pick
+another team at any time to add it; uncheck every team to unbind the project. Each team's
+issues appear in the Linear group of the issue list, sorted with the rest by last update, and
+each can be loaded further on its own. Agents file new issues in the first team picked.
 
 Select an issue to open it beside the list: description, comments, state changes, linked pull
 requests, labels, assignees, and reactions. Linked pull requests open in the same panel. You can

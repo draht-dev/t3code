@@ -50,6 +50,7 @@ import { drahtWorkflowCommandInput } from "./draht_workflow_command/input.ts";
 import { assertDrahtWorkflowCommandOutput } from "./draht_workflow_command/output.ts";
 import { drahtWorkflowCommandStopInput } from "./draht_workflow_command_stop/input.ts";
 import { assertDrahtWorkflowCommandStopOutput } from "./draht_workflow_command_stop/output.ts";
+import { assertClaudeUsageLimitOutput } from "./usage_limit/claude_output.ts";
 import { grokAutoBlockedCommandInput } from "./grok_auto_blocked_command/input.ts";
 import { kiroCompactionInput } from "./kiro_compaction/input.ts";
 import { kiroForkFromTurnInput } from "./kiro_fork_from_turn/input.ts";
@@ -525,6 +526,18 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./claude_idle_resume/claude_transcript.ndjson", import.meta.url),
         modelSelection: CLAUDE_MODEL_SELECTION,
         assertOutput: assertClaudeIdleResumeOutput,
+      },
+    ],
+  },
+  {
+    name: "usage_limit",
+    buildInput: simpleInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        transcriptFile: new URL("./usage_limit/claude_transcript.ndjson", import.meta.url),
+        modelSelection: CLAUDE_MODEL_SELECTION,
+        assertOutput: assertClaudeUsageLimitOutput,
       },
     ],
   },
