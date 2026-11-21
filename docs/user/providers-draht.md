@@ -27,6 +27,8 @@ another session because T3 owns those parts of the process lifecycle.
 Update npm-managed Draht with `draht update --self`. If another package manager owns the
 installation, such as a Nix profile, update it through that manager instead.
 
+In a [managed policy](./managed-policy.md#providers), Draht's provider ID is `draht`.
+
 ## What Carries Over
 
 T3 Code discovers the models reported by Draht and exposes their supported thinking levels. Threads
