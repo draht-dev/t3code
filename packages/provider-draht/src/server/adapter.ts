@@ -380,6 +380,11 @@ function compactionTitle(status: DrahtCompactionStatus): string {
   }
 }
 
+type DrahtMessageTokenUsage = Pick<
+  OrchestrationV2ProviderTurnTokenUsage,
+  "inputTokens" | "cachedInputTokens" | "outputTokens"
+>;
+
 interface ActiveDrahtTurn {
   readonly turnInput: ProviderAdapter.ProviderAdapterV2TurnInput;
   readonly providerTurn: OrchestrationV2ProviderTurn;
@@ -397,6 +402,7 @@ interface ActiveDrahtTurn {
   readonly promptMayBeCommandOnly: boolean;
   latestCompactionAfterTokens: number | null;
   lastLiveUsedTokens: number | null;
+  lastMessageUsage: DrahtMessageTokenUsage | undefined;
   settleProbeGeneration: number;
   /** An extension may start compaction immediately after Draht emits agent_settled. */
   settleWhenIdle: boolean;
@@ -757,6 +763,25 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
         return value === undefined ? undefined : Math.max(0, Math.trunc(value));
       };
 
+      // Draht counts uncached input, cache reads and cache writes separately; input includes all three.
+      const drahtMessageTokenUsage = (usage: unknown): DrahtMessageTokenUsage => {
+        const uncachedInputTokens = nonNegativeInteger(usage, "input");
+        const cachedInputTokens = nonNegativeInteger(usage, "cacheRead");
+        const outputTokens = nonNegativeInteger(usage, "output");
+        return {
+          ...(uncachedInputTokens === undefined
+            ? {}
+            : {
+                inputTokens:
+                  uncachedInputTokens +
+                  (cachedInputTokens ?? 0) +
+                  (nonNegativeInteger(usage, "cacheWrite") ?? 0),
+              }),
+          ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+          ...(outputTokens === undefined ? {} : { outputTokens }),
+        };
+      };
+
       const rememberModelContextWindow = (model: unknown): number | null => {
         const provider = recordString(model, "provider");
         const id = recordString(model, "id");
@@ -789,6 +814,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
       const tokenUsageFromStats = (
         stats: unknown,
         fallbackUsedTokens: number | null,
+        messageUsage: DrahtMessageTokenUsage | undefined,
         updatedAt: DateTime.Utc,
       ): OrchestrationV2ProviderTurnTokenUsage | undefined => {
         const contextUsage = recordField(stats, "contextUsage");
@@ -797,24 +823,20 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
           nonNegativeInteger(contextUsage, "tokens") ?? fallbackUsedTokens ?? undefined;
         if (usedTokens === undefined || maxTokens === undefined || maxTokens === 0)
           return undefined;
-
-        const totals = recordField(stats, "tokens");
-        const inputTokens = nonNegativeInteger(totals, "input");
-        const cachedInputTokens = nonNegativeInteger(totals, "cacheRead");
-        const outputTokens = nonNegativeInteger(totals, "output");
-        return {
-          usedTokens,
-          maxTokens,
-          ...(inputTokens === undefined ? {} : { inputTokens }),
-          ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
-          ...(outputTokens === undefined ? {} : { outputTokens }),
-          updatedAt: DateTime.formatIso(updatedAt),
-        };
+        // Stats `tokens` are whole-session totals; the breakdown comes from the turn's last message.
+        return { usedTokens, maxTokens, ...messageUsage, updatedAt: DateTime.formatIso(updatedAt) };
       };
 
-      const readTokenUsage = (fallbackUsedTokens: number | null, updatedAt: DateTime.Utc) =>
+      const readTokenUsage = (turn: ActiveDrahtTurn, updatedAt: DateTime.Utc) =>
         request({ type: "get_session_stats" }, 2_000).pipe(
-          Effect.map((stats) => tokenUsageFromStats(stats, fallbackUsedTokens, updatedAt)),
+          Effect.map((stats) =>
+            tokenUsageFromStats(
+              stats,
+              turn.latestCompactionAfterTokens,
+              turn.lastMessageUsage,
+              updatedAt,
+            ),
+          ),
           Effect.orElseSucceed(() => undefined),
         );
 
@@ -825,6 +847,9 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
         /* Provider events include streaming deltas; avoid a span for each update. */
         Effect.fnUntraced(function* (turn: ActiveDrahtTurn, usage: unknown) {
           const usedTokens = nonNegativeInteger(usage, "totalTokens");
+          if (usedTokens !== undefined && usedTokens > 0) {
+            turn.lastMessageUsage = drahtMessageTokenUsage(usage);
+          }
           if (
             usedTokens === undefined ||
             usedTokens === 0 ||
@@ -835,9 +860,6 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
             return;
           }
           turn.lastLiveUsedTokens = usedTokens;
-          const inputTokens = nonNegativeInteger(usage, "input");
-          const cachedInputTokens = nonNegativeInteger(usage, "cacheRead");
-          const outputTokens = nonNegativeInteger(usage, "output");
           const updatedAt = yield* DateTime.now;
           yield* emit({
             type: "provider_turn.updated",
@@ -848,9 +870,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
               tokenUsage: {
                 usedTokens,
                 maxTokens: contextWindow,
-                ...(inputTokens === undefined ? {} : { inputTokens }),
-                ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
-                ...(outputTokens === undefined ? {} : { outputTokens }),
+                ...turn.lastMessageUsage,
                 updatedAt: DateTime.formatIso(updatedAt),
               },
             },
@@ -2018,9 +2038,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
         forgetSettledSubagents();
         const treeRefs =
           turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
-        const tokenUsage = readUsage
-          ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
-          : undefined;
+        const tokenUsage = readUsage ? yield* readTokenUsage(turn, completedAt) : undefined;
         const failure = interrupted ? null : (turn.rejectedPromptFailure ?? turn.failure);
         yield* emit({
           type: "provider_turn.updated",
@@ -3052,6 +3070,7 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
                 compactCommand !== null || (payload?.message.trimStart().startsWith("/") ?? false),
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
+              lastMessageUsage: undefined,
               settleProbeGeneration: 0,
               settleWhenIdle: false,
               sawCompaction: false,
