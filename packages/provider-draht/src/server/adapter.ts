@@ -3424,7 +3424,6 @@ export const makeDrahtAdapterV2 = Effect.fn("makeDrahtAdapterV2")(function* (
             );
             return {
               providerThread: state.providerThread,
-              providerTurns: [],
               messages,
               runtimeRequests: [],
             };
@@ -3861,7 +3860,7 @@ function drahtExtensionDisplayName(extensionPath: string | undefined): string {
 function drahtThreadSnapshot(
   providerThread: OrchestrationV2ProviderThread,
 ): ProviderAdapter.ProviderAdapterV2ThreadSnapshot {
-  return { providerThread, providerTurns: [], messages: [], runtimeRequests: [] };
+  return { providerThread, messages: [], runtimeRequests: [] };
 }
 
 function drahtQuestion(
