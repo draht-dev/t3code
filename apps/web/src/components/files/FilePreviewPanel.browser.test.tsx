@@ -174,6 +174,8 @@ vi.mock(import("./projectFilesQueryState"), async (original) => ({
 }));
 
 import FilePreviewPanel from "./FilePreviewPanel";
+import { ChunkedMarkdown } from "./ChunkedMarkdown";
+import { splitMarkdown } from "@t3tools/shared/markdownChunks";
 
 const environmentId = EnvironmentId.make("markdown-preview-test");
 const threadRef = { environmentId, threadId: ThreadId.make("thread") };
@@ -789,6 +791,33 @@ describe("rendered Markdown select all", () => {
     await userEvent.click(screen.getByRole("checkbox"));
     await expectFileOnlySelection();
   });
+
+  it("copies the whole chunked file with its own line endings", async () => {
+    using _settings = setup();
+    const contents = `first\r\r# ${"x\r\r# ".repeat(2_000)}end`;
+    await using _screen = await render(
+      <div style={{ height: 600, display: "flex", flexDirection: "column" }}>
+        {markdownPreview(false, contents, "cr.md")}
+      </div>,
+    );
+    const firstChunk = await vi.waitFor(() => {
+      const first = document.querySelector("h1");
+      expect(first).not.toBeNull();
+      return first!;
+    });
+    await userEvent.click(firstChunk);
+    await userEvent.keyboard(
+      isMacPlatform(navigator.platform) ? "{Meta>}a{/Meta}" : "{Control>}a{/Control}",
+    );
+    let copied: string | undefined;
+    const read = (event: ClipboardEvent) => {
+      copied = event.clipboardData?.getData("text/plain");
+    };
+    window.addEventListener("copy", read);
+    using _listener = { [Symbol.dispose]: () => window.removeEventListener("copy", read) };
+    document.execCommand("copy");
+    expect(copied).toBe(contents);
+  });
 });
 
 describe("rendered Markdown relative images", () => {
@@ -804,5 +833,213 @@ describe("rendered Markdown relative images", () => {
     expect(state.assetResources).toContainEqual(
       expect.objectContaining({ _tag: "media-file", path: expectedPath }),
     );
+  });
+});
+
+function withAppCss() {
+  const style = document.createElement("style");
+  style.textContent = appCss;
+  document.head.append(style);
+  return { [Symbol.dispose]: () => style.remove() };
+}
+
+function sized(children: ReactNode) {
+  return (
+    <div style={{ width: 500, height: 400, display: "flex", flexDirection: "column" }}>
+      {children}
+    </div>
+  );
+}
+
+describe("rendered Markdown scroll position", () => {
+  const sections = Array.from(
+    { length: 200 },
+    (_, index) => `## Section ${index}\n\nParagraph ${index}.\n`,
+  ).join("\n");
+  const scroller = () =>
+    document.querySelector<HTMLElement>(".scrollbar-gutter-both") ?? expect.unreachable();
+  /** The first heading in view and its offset from the top of the viewport. */
+  const readingPosition = () => {
+    const top = scroller().getBoundingClientRect().top;
+    for (const heading of scroller().querySelectorAll("h2")) {
+      const offset = Math.round(heading.getBoundingClientRect().top - top);
+      if (offset > -100) return { heading: heading.textContent, offset };
+    }
+    return null;
+  };
+  const scrollDown = async () => {
+    scroller().scrollTop = 3000;
+    scroller().dispatchEvent(new Event("scroll"));
+    await vi.waitFor(() => expect(readingPosition()?.heading).not.toBe("Section 0"));
+    return readingPosition();
+  };
+  const expectReadingPosition = (saved: ReturnType<typeof readingPosition>) =>
+    vi.waitFor(() => {
+      const position = readingPosition();
+      expect(position?.heading).toBe(saved?.heading);
+      expect(Math.abs((position?.offset ?? 0) - (saved?.offset ?? 0))).toBeLessThanOrEqual(2);
+    });
+
+  it("restores each file's reading position after the preview remounts", async () => {
+    using _settings = setup();
+    using _style = withAppCss();
+    const preview = (relativePath: string) => sized(markdownPreview(false, sections, relativePath));
+
+    let saved: ReturnType<typeof readingPosition>;
+    {
+      await using screen = await render(preview("long.md"));
+      await expect.element(screen.getByText("Section 0", { exact: true })).toBeInTheDocument();
+      saved = await scrollDown();
+    }
+    {
+      await using screen = await render(preview("other.md"));
+      await expect.element(screen.getByText("Section 0", { exact: true })).toBeInTheDocument();
+      expect(scroller().scrollTop, "another file opens at the top").toBe(0);
+    }
+    await using _screen = await render(preview("long.md"));
+    await expectReadingPosition(saved);
+  });
+
+  it("waits for the saved chunk when a reopened file is still streaming in", async () => {
+    using _settings = setup();
+    using _style = withAppCss();
+    const { chunks, definitions } = splitMarkdown(sections, 200);
+    const preview = (loaded: number, loading: boolean) =>
+      sized(
+        <ChunkedMarkdown
+          chunks={chunks.slice(0, loaded)}
+          definitions={definitions}
+          loading={loading}
+          cwd="/workspace"
+          relativePath="streaming.md"
+          threadRef={threadRef}
+          workspaceMutationId={null}
+        />,
+      );
+
+    let saved: ReturnType<typeof readingPosition>;
+    {
+      await using screen = await render(preview(chunks.length, false));
+      await expect.element(screen.getByText("Section 0", { exact: true })).toBeInTheDocument();
+      saved = await scrollDown();
+    }
+    await using screen = await render(preview(3, true));
+    expect(document.querySelector(".scrollbar-gutter-both"), "no list before the chunk").toBeNull();
+    await screen.rerender(preview(chunks.length, false));
+    await expectReadingPosition(saved);
+  });
+
+  it("keeps each thread's position when the same file stays open across threads", async () => {
+    using _settings = setup();
+    using _style = withAppCss();
+    const { chunks, definitions } = splitMarkdown(sections, 200);
+    const preview = (threadId: string) =>
+      sized(
+        <ChunkedMarkdown
+          chunks={chunks}
+          definitions={definitions}
+          cwd="/workspace"
+          relativePath="shared.md"
+          threadRef={{ environmentId, threadId: ThreadId.make(threadId) }}
+          workspaceMutationId={null}
+        />,
+      );
+
+    await using screen = await render(preview("first"));
+    await expect.element(screen.getByText("Section 0", { exact: true })).toBeInTheDocument();
+    const saved = await scrollDown();
+    await screen.rerender(preview("second"));
+    await vi.waitFor(() => expect(readingPosition()?.heading).toBe("Section 0"));
+    await screen.rerender(preview("first"));
+    await expectReadingPosition(saved);
+  });
+});
+
+describe("rendered Markdown footnotes across chunks", () => {
+  it("renders cross-chunk footnotes with document-wide numbering and one footnotes section", async () => {
+    using _settings = setup();
+    using _style = withAppCss();
+    const paragraphs = Array.from(
+      { length: 60 },
+      (_, i) =>
+        `Paragraph ${i}. ${"Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(2)}`,
+    );
+    const markdown = [
+      "A footnote reference.[^1]",
+      "",
+      ...paragraphs.slice(0, 35).flatMap((p) => [p, ""]),
+      "Second note[^second] and repeat[^1].",
+      "",
+      ...paragraphs.slice(35).flatMap((p) => [p, ""]),
+      "[^1]: The footnote text.",
+      "[^second]: The second footnote.",
+      "",
+      "    - [ ] Footnote task",
+    ].join("\n");
+    const onTaskListChange = vi.fn();
+
+    const split = splitMarkdown(markdown);
+    expect(split.chunks.length).toBeGreaterThan(1);
+    expect(split.footnotes).toBeDefined();
+
+    await using screen = await render(
+      sized(
+        <ChunkedMarkdown
+          {...split}
+          cwd="/workspace"
+          relativePath="footnotes.md"
+          threadRef={threadRef}
+          workspaceMutationId={null}
+          onTaskListChange={onTaskListChange}
+        />,
+      ),
+    );
+
+    const firstRef = await vi.waitFor(() => {
+      const link = screen.container.querySelector<HTMLAnchorElement>(
+        'a[data-footnote-ref][href="#user-content-fn-1"]',
+      );
+      expect(link).not.toBeNull();
+      return link!;
+    });
+    expect(firstRef.textContent).toBe("1");
+    expect(screen.container.textContent).not.toContain("[^1]");
+
+    // Clicking the footnote ref scrolls to the trailing footnotes section even in a virtualized list.
+    firstRef.click();
+    await vi.waitFor(() => {
+      const sections = screen.container.querySelectorAll("section[data-footnotes]");
+      expect(sections.length).toBe(1);
+      expect(sections[0]!.textContent).toContain("The footnote text.");
+      expect(sections[0]!.textContent).toContain("The second footnote.");
+    });
+
+    // A task in a footnote edits its line in the file, not in the section's own text.
+    await act(async () =>
+      screen.container
+        .querySelector<HTMLInputElement>('section[data-footnotes] input[type="checkbox"]')!
+        .click(),
+    );
+    expect(onTaskListChange).toHaveBeenCalledExactlyOnceWith({
+      markerOffset: markdown.indexOf("[ ] Footnote task"),
+      checked: true,
+    });
+
+    // Clicking the backref returns to the first reference (fnref-1) at the top of chunk 0.
+    const backref = screen.container.querySelector<HTMLAnchorElement>(
+      'section[data-footnotes] a[data-footnote-backref][href="#user-content-fnref-1"]',
+    );
+    expect(backref).not.toBeNull();
+    const scroller = screen.container.querySelector<HTMLElement>(".scrollbar-gutter-both")!;
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    backref!.click();
+    await vi.waitFor(() => {
+      const topRef = screen.container.querySelector<HTMLAnchorElement>(
+        'a[data-footnote-ref][id$="fnref-1"]',
+      );
+      expect(topRef).not.toBeNull();
+      expect(topRef!.textContent).toBe("1");
+      expect(scroller.scrollTop).toBeLessThan(200);
+    });
   });
 });
